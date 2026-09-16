@@ -1,0 +1,239 @@
+diff --git a/drivers/video/fbdev/Kconfig b/drivers/video/fbdev/Kconfig
+--- a/drivers/video/fbdev/Kconfig
++++ b/drivers/video/fbdev/Kconfig
+@@ -1826,3 +1826,4 @@
+
++source "drivers/video/fbdev/vmcfb/Kconfig"
+diff --git a/drivers/video/fbdev/Makefile b/drivers/video/fbdev/Makefile
+--- a/drivers/video/fbdev/Makefile
++++ b/drivers/video/fbdev/Makefile
+@@ -127,3 +127,4 @@
+
++obj-$(CONFIG_FB_VMCFB) += vmcfb/
+diff --git a/Microsoft/config-wsl b/Microsoft/config-wsl
+--- a/Microsoft/config-wsl
++++ b/Microsoft/config-wsl
+@@ -1,3 +1,5 @@
++CONFIG_FB=y
++CONFIG_FB_VMCFB=y
++
+diff --git a/drivers/video/fbdev/vmcfb/Kconfig b/drivers/video/fbdev/vmcfb/Kconfig
+new file mode 100644
+--- /dev/null
++++ b/drivers/video/fbdev/vmcfb/Kconfig
+@@ -0,0 +1,8 @@
++config FB_VMCFB
++	tristate "WSL virtual RAM framebuffer"
++	depends on FB
++	select FB_CFB_FILLRECT
++	select FB_CFB_COPYAREA
++	select FB_CFB_IMAGEBLIT
++	help
++	  Minimal 240x320 16-bit RGB565 RAM framebuffer for WSL.
+diff --git a/drivers/video/fbdev/vmcfb/Makefile b/drivers/video/fbdev/vmcfb/Makefile
+new file mode 100644
+--- /dev/null
++++ b/drivers/video/fbdev/vmcfb/Makefile
+@@ -0,0 +1 @@
++obj-$(CONFIG_FB_VMCFB) += vmcfb.o
+diff --git a/drivers/video/fbdev/vmcfb/vmcfb.c b/drivers/video/fbdev/vmcfb/vmcfb.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/video/fbdev/vmcfb/vmcfb.c
+@@ -0,0 +1,177 @@
++// SPDX-License-Identifier: GPL-2.0
++
++#include <linux/fb.h>
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/vmalloc.h>
++#include <linux/uaccess.h>
++
++#define VMCFB_WIDTH  240
++#define VMCFB_HEIGHT 320
++#define VMCFB_BPP    16
++#define VMCFB_SIZE   (VMCFB_WIDTH * VMCFB_HEIGHT * 2)
++
++static void *vmcfb_memory;
++
++static const struct fb_fix_screeninfo vmcfb_fix = {
++	.id		= "vmcfb",
++	.type		= FB_TYPE_PACKED_PIXELS,
++	.visual		= FB_VISUAL_TRUECOLOR,
++	.xpanstep	= 0,
++	.ypanstep	= 0,
++	.ywrapstep	= 0,
++	.accel		= FB_ACCEL_NONE,
++};
++
++static int vmcfb_check_var(struct fb_var_screeninfo *var,
++			   struct fb_info *info)
++{
++	if (var->xres != VMCFB_WIDTH ||
++	    var->yres != VMCFB_HEIGHT ||
++	    var->xres_virtual != VMCFB_WIDTH ||
++	    var->yres_virtual != VMCFB_HEIGHT)
++		return -EINVAL;
++
++	var->bits_per_pixel = VMCFB_BPP;
++
++	var->red.offset = 11;
++	var->red.length = 5;
++
++	var->green.offset = 5;
++	var->green.length = 6;
++
++	var->blue.offset = 0;
++	var->blue.length = 5;
++
++	var->transp.offset = 0;
++	var->transp.length = 0;
++
++	return 0;
++}
++
++static int vmcfb_set_par(struct fb_info *info)
++{
++	info->fix.visual = FB_VISUAL_TRUECOLOR;
++	info->fix.line_length = VMCFB_WIDTH * 2;
++
++	return 0;
++}
++
++static int vmcfb_mmap(struct fb_info *info,
++		      struct vm_area_struct *vma)
++{
++	vma->vm_page_prot = pgprot_decrypted(vma->vm_page_prot);
++
++	return remap_vmalloc_range(vma, info->screen_buffer, vma->vm_pgoff);
++}
++
++static const struct fb_ops vmcfb_ops = {
++	.owner = THIS_MODULE,
++
++	__FB_DEFAULT_SYSMEM_OPS_RDWR,
++
++	.fb_check_var = vmcfb_check_var,
++	.fb_set_par = vmcfb_set_par,
++
++	__FB_DEFAULT_SYSMEM_OPS_DRAW,
++
++	.fb_mmap = vmcfb_mmap,
++};
++
++static int vmcfb_probe(struct platform_device *pdev)
++{
++	struct fb_info *info;
++	int ret;
++
++	vmcfb_memory = vmalloc_32_user(VMCFB_SIZE);
++	if (!vmcfb_memory)
++		return -ENOMEM;
++
++	memset(vmcfb_memory, 0, VMCFB_SIZE);
++
++	info = framebuffer_alloc(sizeof(u32) * 256, &pdev->dev);
++	if (!info) {
++		vfree(vmcfb_memory);
++		vmcfb_memory = NULL;
++		return -ENOMEM;
++	}
++
++	info->screen_buffer = vmcfb_memory;
++	info->screen_size = VMCFB_SIZE;
++	info->fbops = &vmcfb_ops;
++
++	info->fix = vmcfb_fix;
++	info->fix.smem_start = (unsigned long)vmcfb_memory;
++	info->fix.smem_len = VMCFB_SIZE;
++	info->fix.line_length = VMCFB_WIDTH * 2;
++
++	info->var.xres = VMCFB_WIDTH;
++	info->var.yres = VMCFB_HEIGHT;
++	info->var.xres_virtual = VMCFB_WIDTH;
++	info->var.yres_virtual = VMCFB_HEIGHT;
++	info->var.bits_per_pixel = VMCFB_BPP;
++	info->var.activate = FB_ACTIVATE_NOW;
++
++	ret = vmcfb_check_var(&info->var, info);
++	if (ret)
++		goto err_release;
++
++	ret = vmcfb_set_par(info);
++	if (ret)
++		goto err_release;
++
++	platform_set_drvdata(pdev, info);
++
++	ret = register_framebuffer(info);
++	if (ret)
++		goto err_release;
++
++	dev_info(&pdev->dev,
++		 "vmcfb: %dx%d %dbpp framebuffer registered\n",
++		 VMCFB_WIDTH, VMCFB_HEIGHT, VMCFB_BPP);
++
++	return 0;
++
++err_release:
++	framebuffer_release(info);
++	vfree(vmcfb_memory);
++	vmcfb_memory = NULL;
++
++	return ret;
++}
++
++static void vmcfb_remove(struct platform_device *pdev)
++{
++	struct fb_info *info = platform_get_drvdata(pdev);
++
++	unregister_framebuffer(info);
++	framebuffer_release(info);
++
++	vfree(vmcfb_memory);
++	vmcfb_memory = NULL;
++}
++
++static struct platform_driver vmcfb_driver = {
++	.driver = {
++		.name = "vmcfb",
++	},
++	.probe = vmcfb_probe,
++	.remove = vmcfb_remove,
++};
++
++static struct platform_device *vmcfb_device;
++
++static int __init vmcfb_init(void)
++{
++	int ret;
++
++	vmcfb_device = platform_device_register_simple("vmcfb", -1, NULL, 0);
++	if (IS_ERR(vmcfb_device))
++		return PTR_ERR(vmcfb_device);
++
++	ret = platform_driver_register(&vmcfb_driver);
++	if (ret) {
++		platform_device_unregister(vmcfb_device);
++		vmcfb_device = NULL;
++		return ret;
++	}
++
++	return 0;
++}
++
++static void __exit vmcfb_exit(void)
++{
++	platform_driver_unregister(&vmcfb_driver);
++
++	if (vmcfb_device)
++		platform_device_unregister(vmcfb_device);
++}
++
++module_init(vmcfb_init);
++module_exit(vmcfb_exit);
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("VMC");
++MODULE_DESCRIPTION("Minimal WSL RAM framebuffer");
