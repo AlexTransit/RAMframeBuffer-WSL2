@@ -426,11 +426,12 @@ Microsoft/config-wsl
 nano Microsoft/config-wsl
 ```
 
-Нужно включить framebuffer:
+Нужно включить framebuffer и отключить сонсоль в него (иначе будет мешать курсор):
 
 ```text
 CONFIG_FB=y
 CONFIG_FB_VMCFB=y
+CONFIG_FRAMEBUFFER_CONSOLE=n
 ```
 
 Если в файле уже есть:
